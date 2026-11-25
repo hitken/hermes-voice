@@ -135,6 +135,7 @@ class LivePeer:
         self._on_closed = on_closed
         self.delegation = delegation
         self._delegation_id: str | None = None
+        self._extra_instructions: list[str] = []
         self._speak_queue: asyncio.Queue[str] = asyncio.Queue()
         self._response_done = asyncio.Event()
 
@@ -288,9 +289,11 @@ class LivePeer:
         elif kind == "session.instructions.append":
             content = str(event.get("content") or "").strip()
             if content and self.upstream is not None:
-                update = self._session_update()
+                self._extra_instructions.append(content)
+                update = self._session_update(self.delegation)
                 session = update.get("session") or {}
-                session["instructions"] = f"{session.get('instructions', '')}\n{content}".strip()
+                extra = "\n".join(self._extra_instructions)
+                session["instructions"] = f"{session.get('instructions', '')}\n{extra}".strip()
                 update["session"] = session
                 self._spawn(self._send_upstream(update))
         elif kind == "session.commentary.append":
@@ -327,22 +330,16 @@ class LivePeer:
                 continue
 
             self._response_done.clear()
+            # 用 response.instructions 直接指定本次回答内容，比塞一条 user 消息
+            # 可靠得多：后者偶尔会被模型当成指令，只回一句「好的，我这就开始」。
             await self._send_upstream(
                 {
-                    "type": "conversation.item.create",
-                    "item": {
-                        "type": "message",
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": f"请照着念下面这段文本，不要改写、不要回答、不要加话：\n{text}",
-                            },
-                        ],
+                    "type": "response.create",
+                    "response": {
+                        "instructions": f"请逐字念出下面这段话，不要说任何额外的话：{text}",
                     },
                 },
             )
-            await self._send_upstream({"type": "response.create"})
             try:
                 await asyncio.wait_for(self._response_done.wait(), 30)
             except asyncio.TimeoutError:

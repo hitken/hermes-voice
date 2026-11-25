@@ -15,6 +15,14 @@ sys.path.insert(0, str(ROOT))
 from live_gateway import IN_RATE, OUT_RATE, OUT_SAMPLES, LivePeer, OutboundTrack  # noqa: E402
 
 
+class FakeUpstream:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, payload):
+        self.sent.append(json.loads(payload))
+
+
 class FakeChannel:
     def __init__(self):
         self.readyState = "open"
@@ -40,6 +48,12 @@ def make_peer(stats, delegation=False):
     peer._started_at = asyncio.get_running_loop().time()
     peer.delegation = delegation
     peer._delegation_id = None
+    peer._extra_instructions = []
+    peer._session_update = lambda delegation=False: {
+        "type": "session.update",
+        "session": {"instructions": "base", "turn_detection": {}},
+    }
+    peer._tasks = set()
     peer._speak_queue = asyncio.Queue()
     peer._response_done = asyncio.Event()
     return peer
@@ -129,6 +143,14 @@ async def main():
     )
     assert dpeer._speak_queue.qsize() == 1
     assert dpeer._speak_queue.get_nowait() == "查到了"
+
+    dpeer.upstream = FakeUpstream()
+    dpeer._on_client_event({"type": "session.instructions.append", "content": "第一条"})
+    dpeer._on_client_event({"type": "session.instructions.append", "content": "第二条"})
+    await asyncio.sleep(0)
+    text = dpeer.upstream.sent[-1]["session"]["instructions"]
+    assert "第一条" in text and "第二条" in text, text
+    print("instructions accumulate OK")
 
     # 非委派模式不应主动发委派事件
     apeers = make_peer({})

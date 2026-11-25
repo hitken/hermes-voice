@@ -12,6 +12,8 @@
 > `create_webrtc_session()` 生成真实 SDP 并完成握手，WebRTC 连通、字幕和声音正常。
 > M3：委派模式已实现。实测 qwen 不抢答，发出 `session.delegation.created`，
 > 收到 `session.commentary.append` 后准确念出委派答案；A 模式无回归。
+> 朗读用 `response.create` 的 `response.instructions` 指定内容（不用 user 消息），
+> 否则模型偶尔只回「好的，我这就开始」而不念正文。
 > 单测 `tests/test_live_gateway.py`、`tests/test_bridge.py` 均通过。
 
 ## 1. 背景
