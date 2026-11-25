@@ -12,7 +12,9 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from live_gateway import IN_RATE, OUT_RATE, OUT_SAMPLES, LivePeer, OutboundTrack  # noqa: E402
+from live_gateway import (  # noqa: E402
+    IN_RATE, OUT_RATE, OUT_SAMPLES, LivePeer, OutboundTrack, is_small_talk,
+)
 
 
 class FakeUpstream:
@@ -48,6 +50,11 @@ def make_peer(stats, delegation=False):
     peer._started_at = asyncio.get_running_loop().time()
     peer.delegation = delegation
     peer._delegation_id = None
+    peer._delegation_pending = False
+    peer._answer_received = False
+    peer._pending_turns = []
+    peer._direct_texts = []
+    peer._direct_timer = None
     peer._extra_instructions = []
     peer._session_update = lambda delegation=False: {
         "type": "session.update",
@@ -164,6 +171,33 @@ async def main():
         m["type"] == "session.delegation.created" for m in apeers.channel.messages
     )
     print("delegation OK")
+
+    # 7) 短问候走直接回答，不进 Hermes；上一轮未完成时新话排队
+    assert is_small_talk("你好，能听到我说话吗？")
+    assert is_small_talk("回答我呢")
+    assert not is_small_talk("帮我查一下当前目录的文件")
+
+    dpeer.upstream = FakeUpstream()
+    await dpeer._answer_direct("能听到你说话")
+    sent = dpeer.upstream.sent[-1]
+    assert sent["type"] == "response.create"
+    assert "能听到你说话" in sent["response"]["instructions"]
+    assert "不要重复问题" in sent["response"]["instructions"]
+
+    dpeer._delegation_pending = True
+    dpeer._pending_turns.clear()
+    dpeer.channel.messages.clear()
+    dpeer._handle_upstream_event(
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "transcript": "再帮我看看另一个文件",
+        }
+    )
+    assert not any(
+        m["type"] == "session.delegation.created" for m in dpeer.channel.messages
+    )
+    assert dpeer._pending_turns == ["再帮我看看另一个文件"]
+    print("small talk + pending queue OK")
 
     assert IN_RATE == 16000 and OUT_RATE == 48000
     print("gateway test OK")

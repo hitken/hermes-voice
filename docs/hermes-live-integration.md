@@ -14,6 +14,12 @@
 > 收到 `session.commentary.append` 后准确念出委派答案；A 模式无回归。
 > 朗读用 `response.create` 的 `response.instructions` 指定内容（不用 user 消息），
 > 否则模型偶尔只回「好的，我这就开始」而不念正文。
+>
+> 实测发现两个真实使用中的问题并已处理：
+> 1. Hermes 对「你好，能听到吗」也会跑十几轮工具，耗时 20~30 秒；且用户接着说话会
+>    触发新委派，Hermes 中断上一轮并把回复标为已念，导致完全没有声音。
+>    现在短问候直接由 qwen 语音回答；上一轮未完成时新话排队，不重复委派。
+> 2. 超过 10 秒没有结果时，先让 qwen 说「Hermes 正在处理，请稍等」。
 > 单测 `tests/test_live_gateway.py`、`tests/test_bridge.py` 均通过。
 
 ## 1. 背景

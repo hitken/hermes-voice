@@ -21,6 +21,7 @@ import asyncio
 import base64
 import json
 import logging
+import re
 import time
 import uuid
 from collections import deque
@@ -44,6 +45,19 @@ OUT_BYTES = OUT_SAMPLES * 2
 
 IN_RATE = 16000
 DASHSCOPE_OUT_RATE = 24000
+
+# 这些短句不需要 Hermes 跑工具，直接让 qwen 用语音回答，省掉几十秒延迟。
+SMALL_TALK_RE = re.compile(
+    r"(你好|您好|嗨|喂|在吗|在不在|能听到|听得到|听的到|听到我|你好吗|"
+    r"谢谢|多谢|辛苦了|再见|拜拜|晚安|早上好|中午好|晚上好|哈哈|呵呵|"
+    r"好的|好吧|没事|开玩笑|你是谁|你叫什么|谁呀|干嘛呢|在干吗|"
+    r"今天怎么样|最近怎么样|回答我|说话呀|你在哪)"
+)
+
+
+def is_small_talk(text: str) -> bool:
+    text = text.strip()
+    return len(text) <= 24 and bool(SMALL_TALK_RE.search(text))
 
 
 class OutboundTrack(AudioStreamTrack):
@@ -135,6 +149,11 @@ class LivePeer:
         self._on_closed = on_closed
         self.delegation = delegation
         self._delegation_id: str | None = None
+        self._delegation_pending = False
+        self._answer_received = False
+        self._pending_turns: list[str] = []
+        self._direct_texts: list[str] = []
+        self._direct_timer: asyncio.Task | None = None
         self._extra_instructions: list[str] = []
         self._speak_queue: asyncio.Queue[str] = asyncio.Queue()
         self._response_done = asyncio.Event()
@@ -183,10 +202,11 @@ class LivePeer:
 
     # ---------- 生命周期 ----------
 
-    def _spawn(self, coro) -> None:
+    def _spawn(self, coro) -> asyncio.Task:
         task = asyncio.ensure_future(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+        return task
 
     async def start(self, offer_sdp: str) -> str:
         """接住 offer，连上游，返回 answer SDP。"""
@@ -280,6 +300,14 @@ class LivePeer:
 
     def _on_client_event(self, event: dict[str, Any]) -> None:
         kind = event.get("type")
+        if kind in (
+            "session.commentary.append",
+            "session.thinking.append",
+            "session.instructions.append",
+            "session.close",
+        ):
+            detail = str(event.get("content") or event.get("reason") or "")[:80]
+            log.info("%s <- client %s %s", self.id, kind, detail)
         if kind == "session.close":
             self._spawn(self.close("client_closed"))
         elif kind == "session.input_audio.mute":
@@ -299,6 +327,7 @@ class LivePeer:
         elif kind == "session.commentary.append":
             content = str(event.get("content") or "").strip()
             if content and self.delegation:
+                self._answer_received = True
                 self._speak_queue.put_nowait(content)
         elif kind == "session.thinking.append":
             # 进度提示不影响音频，记一笔即可
@@ -313,6 +342,73 @@ class LivePeer:
             pass
 
     # ---------- 委派朗读 ----------
+
+    def _queue_direct(self, text: str) -> None:
+        """短句常被 VAD 切成两半，攒一下再回答一次。"""
+        self._direct_texts.append(text)
+        if self._direct_timer is not None:
+            self._direct_timer.cancel()
+        self._direct_timer = self._spawn(self._flush_direct())
+
+    async def _flush_direct(self) -> None:
+        await asyncio.sleep(2.0)
+        text = max(self._direct_texts, key=len)
+        self._direct_texts.clear()
+        if text:
+            await self._answer_direct(text)
+
+    async def _answer_direct(self, text: str) -> None:
+        """短问候直接让 qwen 语音回答，不走 Hermes 的工具链。"""
+        if self.upstream is None:
+            return
+        log.info("%s direct answer: %s", self.id, text[:40])
+        await self._send_upstream(
+            {
+                "type": "response.create",
+                "response": {
+                    "instructions": (
+                        f"用户问：{text}\n请直接用中文口语回答这个问题本身，"
+                        "只说答案，不要重复问题，不要念提示。"
+                    ),
+                },
+            },
+        )
+
+    def _start_delegation(self, text: str) -> None:
+        self._delegation_id = f"deleg_{uuid.uuid4().hex[:10]}"
+        self._delegation_pending = True
+        self._answer_received = False
+        self._send(
+            {
+                "type": "session.delegation.created",
+                "delegation": {
+                    "id": self._delegation_id,
+                    "type": "client",
+                    "target": "hermes",
+                },
+            },
+        )
+        log.info("%s delegated %s: %s", self.id, self._delegation_id, text[:40])
+        self._spawn(self._delegation_wait(self._delegation_id))
+
+    async def _delegation_wait(self, delegation_id: str) -> None:
+        """Hermes 慢的时候先给一句反馈，别让用户以为断了。"""
+        await asyncio.sleep(10)
+        if self.closed or self._delegation_id != delegation_id:
+            return
+        if self._answer_received or self._delegation_pending is False:
+            return
+        self._speak_queue.put_nowait("收到，Hermes 正在处理，请稍等。")
+
+    def _maybe_next_delegation(self) -> None:
+        """一条答案念完后，再处理排队的后续提问。"""
+        if not self._answer_received or not self._pending_turns:
+            return
+        self._delegation_pending = False
+        self._answer_received = False
+        joined = "；".join(self._pending_turns)
+        self._pending_turns.clear()
+        self._start_delegation(joined)
 
     async def _speak_worker(self) -> None:
         """把 Hermes 的 commentary 文本依次交给 qwen 念出来。
@@ -344,6 +440,7 @@ class LivePeer:
                 await asyncio.wait_for(self._response_done.wait(), 30)
             except asyncio.TimeoutError:
                 log.warning("%s speak timed out", self.id)
+            self._maybe_next_delegation()
 
     # ---------- 音频 ----------
 
@@ -444,18 +541,16 @@ class LivePeer:
                 },
             )
             if self.delegation and str(transcript).strip():
-                self._delegation_id = f"deleg_{uuid.uuid4().hex[:10]}"
-                self._send(
-                    {
-                        "type": "session.delegation.created",
-                        "delegation": {
-                            "id": self._delegation_id,
-                            "type": "client",
-                            "target": "hermes",
-                        },
-                    },
-                )
-                log.info("%s delegated %s: %s", self.id, self._delegation_id, str(transcript)[:40])
+                text = str(transcript).strip()
+                if is_small_talk(text):
+                    self._queue_direct(text)
+                elif self._delegation_pending:
+                    # 上一轮还在跑：排队，不重复委派，否则 Hermes 会中断上一轮
+                    # 并把刚生成的回复标成「已念过」，我们就永远拿不到答案。
+                    self._pending_turns.append(text)
+                    log.info("%s queued turn (%d pending)", self.id, len(self._pending_turns))
+                else:
+                    self._start_delegation(text)
             return
 
         if kind == "response.audio_transcript.delta":

@@ -102,6 +102,17 @@ hermes config set voice.gpt_live.api_key local-omni --force   # 占位，仅为�
 Hermes 用自己的模型和工具干活，再通过 `session.commentary.append` 把文本送回来，
 qwen 只负责念出来。两种模式并存，由请求里的 delegation 字段决定。
 
+委派模式下的两个实用处理：
+
+- **短问候直接答**：像「你好」「能听到吗」「回答我呢」这类闲聊不发给 Hermes，
+  由 qwen 直接语音回答（1~2 秒），避免为一句问候跑几十秒工具调用。
+- **结果排队**：上一轮委派还没出结果时，新说的话先排队，不重复发委派——
+  否则 Hermes 会中断上一轮并把刚生成的回复标记为已念，声音就丢了。
+  超过 10 秒没结果会先说一句「Hermes 正在处理，请稍等」。
+
+> 注意：Hermes 带工具的回答本身可能需要 20~30 秒（取决于它的模型和工具），
+> 这是 Hermes 侧的耗时，不是语音链路的问题。
+
 完整方案和里程碑见 [`docs/hermes-live-integration.md`](docs/hermes-live-integration.md)。
 
 ## 配置项

@@ -50,7 +50,7 @@
     const sendLevelEl = document.getElementById('sendLevel');
 
     const params = new URLSearchParams(location.search);
-    if (params.get('source') === 'wav') wavSourceEl.checked = true;
+    if (['wav', 'smalltalk'].includes(params.get('source'))) wavSourceEl.checked = true;
     if (params.get('delegate') === '1') delegateSourceEl.checked = true;
 
     let pc = null;
@@ -96,7 +96,8 @@
       }
 
       ctx = new AudioContext();
-      const response = await fetch('/test-question.wav');
+      const wavPath = params.get('source') === 'smalltalk' ? '/test-smalltalk.wav' : '/test-question.wav';
+      const response = await fetch(wavPath);
       const buffer = await ctx.decodeAudioData(await response.arrayBuffer());
       const destination = ctx.createMediaStreamDestination();
 
