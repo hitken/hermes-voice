@@ -1,7 +1,12 @@
 # 需求：把 Hermes Desktop 的「实时对话」接到本服务
 
-状态：**待实现**
+状态：**M1 已完成**（WebRTC 网关 + 端到端验证）；M2/M3 待实现
 日期：2026-11-25
+
+> M1 进展：`live_gateway.py` 实现 SDP 握手、音频双向、字幕/错误/关闭事件；
+> `POST /v1/live/sessions` 已接入 `server.py`；`static/live-test.html` 可自测。
+> 实测：WebRTC 连通、模型音频 14 包 / 203520 字节、声卡实测有声 5.14s、
+> 字幕完整、无 JS 报错、会话关闭后无残留。单测 `tests/test_live_gateway.py` 通过。
 
 ## 1. 背景
 
@@ -206,7 +211,7 @@ hermes config set voice.gpt_live.api_key local --force   # 任意非空占位，
 
 | 阶段 | 内容 | 产出 |
 | --- | --- | --- |
-| M1 | WebRTC 网关骨架：`/live/sessions`、SDP 往返、音频双向 | 独立测试页能听到 qwen |
+| M1 ✅ | WebRTC 网关骨架：`/live/sessions`、SDP 往返、音频双向 | 独立测试页能听到 qwen |
 | M2 | 事件映射 + A 模式接入 Hermes | Hermes 里能语音对话 |
 | M3 | 委派模式 B | Hermes 工具可用，语音播报结果 |
 | M4 | 稳定性、错误处理、文档 | README 更新，回归测试 |

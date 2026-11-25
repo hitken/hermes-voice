@@ -19,7 +19,7 @@ from contextlib import suppress
 from pathlib import Path
 
 import websockets
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, HTTPException, WebSocket
 from fastapi.staticfiles import StaticFiles
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -345,6 +345,51 @@ async def api_stats():
     return {**STATS, "uptimeSec": round(time.monotonic() - STARTED_AT, 1)}
 
 
+LIVE_GATEWAY = None
+
+
+@app.post("/v1/live/sessions")
+@app.post("/live/sessions")
+async def live_sessions(payload: dict):
+    """OpenAI Live 兼容入口：Hermes 把 WebRTC 的 SDP offer 发到这里。
+
+    返回 {"session": {...}, "transport": {"type": "webrtc", "sdp": answer}}。
+    """
+    global LIVE_GATEWAY
+
+    try:
+        from live_gateway import LiveGateway
+    except ImportError:
+        raise HTTPException(
+            status_code=503,
+            detail="缺少 aiortc 依赖，先运行 pip install -r requirements.txt",
+        )
+
+    transport = (payload or {}).get("transport") or {}
+    offer = transport.get("sdp")
+    if not isinstance(offer, str) or not offer.strip():
+        raise HTTPException(status_code=400, detail="缺少 transport.sdp")
+
+    if LIVE_GATEWAY is None:
+        LIVE_GATEWAY = LiveGateway(
+            connect_upstream=lambda: connect_upstream(upstream_url()),
+            session_update=session_update,
+            stats=STATS,
+        )
+
+    try:
+        session_id, answer = await LIVE_GATEWAY.handle_offer(offer)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("live session failed: %r", exc)
+        raise HTTPException(status_code=502, detail=f"WebRTC 会话创建失败：{exc}")
+
+    log.info("live session %s ready", session_id)
+    return {
+        "session": {"id": session_id},
+        "transport": {"type": "webrtc", "sdp": answer},
+    }
+
+
 @app.websocket("/ws")
 async def ws_bridge(client: WebSocket) -> None:
     await client.accept()
@@ -400,6 +445,12 @@ async def ws_bridge(client: WebSocket) -> None:
         with suppress(Exception):
             await client.close()
         log.info("browser disconnected")
+
+
+@app.on_event("shutdown")
+async def shutdown_live_gateway() -> None:
+    if LIVE_GATEWAY is not None:
+        await LIVE_GATEWAY.shutdown()
 
 
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

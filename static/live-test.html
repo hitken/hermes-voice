@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live 网关自测</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; padding: 24px; font: 14px/1.6 ui-sans-serif, system-ui, sans-serif; background: #0b0e14; color: #e2e8f0; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    p.hint { margin: 0 0 16px; color: #94a3b8; }
+    .row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+    button { padding: 8px 16px; border-radius: 8px; border: 1px solid #1e293b; background: #111827; color: #e2e8f0; cursor: pointer; }
+    button:disabled { opacity: .45; cursor: default; }
+    #status { font-weight: 600; }
+    .ok { color: #5eead4; } .bad { color: #f87171; } .wait { color: #fbbf24; }
+    pre { background: #0f172a; border: 1px solid #1e293b; border-radius: 10px; padding: 12px; height: 380px; overflow: auto; font-size: 12px; }
+    audio { width: 100%; margin-top: 8px; }
+    label { color: #94a3b8; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>Live 网关自测</h1>
+  <p class="hint">模拟 Hermes：麦克风（或测试语音）→ WebRTC → /v1/live/sessions → DashScope。</p>
+
+  <div class="row">
+    <button id="startBtn">开始</button>
+    <button id="stopBtn" disabled>结束</button>
+    <span id="status" class="wait">未连接</span>
+  </div>
+  <div class="row">
+    <label><input type="checkbox" id="wavSource"> 用测试语音代替麦克风（自动播放一次）</label>
+    <span id="level" class="wait">远端音量 —</span>
+    <span id="sendLevel" class="wait">发送音量 —</span>
+  </div>
+
+  <audio id="audio" autoplay playsinline></audio>
+  <pre id="log"></pre>
+
+  <script>
+    const logEl = document.getElementById('log');
+    const statusEl = document.getElementById('status');
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const audioEl = document.getElementById('audio');
+    const wavSourceEl = document.getElementById('wavSource');
+    const levelEl = document.getElementById('level');
+    const sendLevelEl = document.getElementById('sendLevel');
+
+    const params = new URLSearchParams(location.search);
+    if (params.get('source') === 'wav') wavSourceEl.checked = true;
+
+    let pc = null;
+    let dc = null;
+    let mic = null;
+    let ctx = null;
+    let levelTimer = null;
+
+    function log(text) {
+      const line = `${new Date().toLocaleTimeString()} ${text}`;
+      logEl.textContent += line + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function status(text, kind) {
+      statusEl.textContent = text;
+      statusEl.className = kind || '';
+    }
+
+    function waitIce(connection) {
+      if (connection.iceGatheringState === 'complete') return Promise.resolve();
+      return new Promise((resolve) => {
+        const check = () => {
+          if (connection.iceGatheringState === 'complete') {
+            connection.removeEventListener('icegatheringstatechange', check);
+            resolve();
+          }
+        };
+        connection.addEventListener('icegatheringstatechange', check);
+        setTimeout(resolve, 4000);
+      });
+    }
+
+    // 返回 { stream, play }：麦克风没有 play，测试语音等 WebRTC 连通后再播，
+    // 否则握手的那几秒会把语音吃掉。
+    async function buildSource() {
+      if (!wavSourceEl.checked) {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
+        log('mic ok');
+        return { stream, play: () => {} };
+      }
+
+      ctx = new AudioContext();
+      const response = await fetch('/test-question.wav');
+      const buffer = await ctx.decodeAudioData(await response.arrayBuffer());
+      const destination = ctx.createMediaStreamDestination();
+
+      // 持续输出静音：否则语音播完后 Chromium 不再发 RTP，
+      // 服务端 VAD 永远等不到 speech_stopped。
+      const silence = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+      const keepAlive = ctx.createBufferSource();
+      keepAlive.buffer = silence;
+      keepAlive.loop = true;
+      keepAlive.connect(destination);
+      keepAlive.start();
+
+      log(`test wav ${buffer.duration.toFixed(2)}s (待播放)`);
+
+      // 发送侧探针：确认音频真的进了 WebRTC，而不是只播给了本地扬声器
+      const sendAnalyser = ctx.createAnalyser();
+      sendAnalyser.fftSize = 2048;
+      ctx.createMediaStreamSource(destination.stream).connect(sendAnalyser);
+      const sendData = new Float32Array(sendAnalyser.fftSize);
+      let sendPeak = 0;
+      setInterval(() => {
+        sendAnalyser.getFloatTimeDomainData(sendData);
+        let local = 0;
+        for (const v of sendData) local = Math.max(local, Math.abs(v));
+        sendPeak = Math.max(sendPeak * 0.85, local);
+        sendLevelEl.textContent = `发送音量 ${(sendPeak * 100).toFixed(0)}%`;
+        sendLevelEl.className = sendPeak > 0.01 ? 'ok' : 'wait';
+      }, 200);
+
+      return {
+        stream: destination.stream,
+        play: async () => {
+          if (ctx.state !== 'running') await ctx.resume().catch(() => {});
+          const source = ctx.createBufferSource();
+          source.buffer = buffer;
+          source.connect(destination);
+          source.start();
+          log(`test wav playing (ctx=${ctx.state})`);
+        },
+      };
+    }
+
+    function monitor(stream) {
+      if (!ctx) ctx = new AudioContext();
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      source.connect(analyser);
+      // 再接到扬声器，保证 headless 下也走真实的音频输出
+      source.connect(ctx.destination);
+
+      const data = new Float32Array(analyser.fftSize);
+      let peak = 0;
+      clearInterval(levelTimer);
+      levelTimer = setInterval(() => {
+        analyser.getFloatTimeDomainData(data);
+        let local = 0;
+        for (const v of data) local = Math.max(local, Math.abs(v));
+        peak = Math.max(peak * 0.9, local);
+        levelEl.textContent = `远端音量 ${(peak * 100).toFixed(0)}%`;
+        levelEl.className = peak > 0.01 ? 'ok' : 'wait';
+      }, 200);
+    }
+
+    async function start() {
+      startBtn.disabled = true;
+      status('连接中…', 'wait');
+      let source = null;
+      try {
+        source = await buildSource();
+        mic = source.stream;
+
+        pc = new RTCPeerConnection();
+        pc.ontrack = (event) => {
+          const stream = new MediaStream([event.track]);
+          audioEl.srcObject = stream;
+          audioEl.play().catch(() => {});
+          monitor(stream);
+          log('remote track');
+        };
+        pc.onconnectionstatechange = () => {
+          log('pc ' + pc.connectionState);
+          if (pc.connectionState === 'connected') status('已连接', 'ok');
+          if (pc.connectionState === 'failed') status('连接失败', 'bad');
+        };
+
+        for (const track of mic.getAudioTracks()) pc.addTrack(track, mic);
+
+        dc = pc.createDataChannel('oai-events');
+        dc.onmessage = (event) => log('<- ' + String(event.data).slice(0, 300));
+        dc.onopen = () => log('datachannel open');
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await waitIce(pc);
+        log('offer ready');
+
+        const response = await fetch('/v1/live/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session: { model: 'qwen3.8-omni-flash-realtime' },
+            transport: { type: 'webrtc', sdp: pc.localDescription.sdp },
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || 'session failed');
+        log('session ' + data.session.id);
+
+        await pc.setRemoteDescription({ type: 'answer', sdp: data.transport.sdp });
+        log('answer applied');
+        stopBtn.disabled = false;
+
+        // 等 ICE 真正连通再开口，避免语音在 DTLS 握手期间被丢掉
+        if (pc.connectionState === 'connected') {
+          setTimeout(() => source?.play(), 600);
+        } else {
+          pc.addEventListener('connectionstatechange', function onConnect() {
+            if (pc?.connectionState === 'connected') {
+              pc.removeEventListener('connectionstatechange', onConnect);
+              setTimeout(() => source?.play(), 600);
+            }
+          });
+        }
+      } catch (error) {
+        log('ERROR ' + error.message);
+        status('失败：' + error.message, 'bad');
+        startBtn.disabled = false;
+      }
+    }
+
+    function stop() {
+      try { dc?.send(JSON.stringify({ type: 'session.close' })); } catch (_) {}
+      mic?.getTracks().forEach((track) => track.stop());
+      clearInterval(levelTimer);
+      setTimeout(() => {
+        pc?.close();
+        pc = null;
+        status('已结束', '');
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+      }, 400);
+    }
+
+    startBtn.addEventListener('click', start);
+    stopBtn.addEventListener('click', stop);
+  </script>
+</body>
+</html>

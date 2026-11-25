@@ -61,6 +61,33 @@ DASHSCOPE_REGION=beijing
 - **建议戴耳机**。外放时扬声器的声音会进麦克风，VAD 会把它当成用户插话。
 - 页面已经开启浏览器回声消除（`echoCancellation`），但外放音量太大仍然会自打断。
 
+## Hermes 实时对话网关（WebRTC，M1）
+
+服务同时暴露了一个 OpenAI Live 兼容入口，给 Hermes Desktop 的「实时对话」用：
+
+```
+Hermes / Electron ── WebRTC(Opus) ──▶ POST /v1/live/sessions ── WebSocket ──▶ DashScope
+                  ◀── oai-events ──── 本服务（协议/音频翻译） ────────────────▶
+```
+
+- `POST /v1/live/sessions`：收 SDP offer，回 `{session, transport:{type:"webrtc", sdp:answer}}`
+- 音频：Opus/48k → 16k PCM 上行；24k PCM → 48k 下行，20ms 一帧
+- 数据通道 `oai-events`：字幕、错误、`session.closed`；用户开口时清空待播音频
+- 可用别名 `POST /live/sessions`
+
+自测页面：**http://127.0.0.1:8000/live-test.html**（勾选“用测试语音”可自动播一段语音，验证双向链路）。
+`?source=wav` 可自动勾选。测试语音是仓库里的 `static/test-question.wav`。
+
+单测：
+
+```bash
+.venv/bin/python tests/test_live_gateway.py   # 重采样 / 事件映射 / 打断 / 统计
+.venv/bin/python tests/test_bridge.py         # 浏览器 WebSocket 链路
+```
+
+当前是 **M1**：只做纯语音对话，不处理 `session.delegation.created`（Hermes 的工具/记忆还不参与）。
+完整方案和后续里程碑见 [`docs/hermes-live-integration.md`](docs/hermes-live-integration.md)。
+
 ## 配置项
 
 | 变量 | 默认值 | 说明 |
