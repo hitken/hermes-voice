@@ -30,6 +30,7 @@
   </div>
   <div class="row">
     <label><input type="checkbox" id="wavSource"> 用测试语音代替麦克风（自动播放一次）</label>
+    <label><input type="checkbox" id="delegateSource"> 模拟 Hermes 委派（收到委派后回传一段答案）</label>
     <span id="level" class="wait">远端音量 —</span>
     <span id="sendLevel" class="wait">发送音量 —</span>
   </div>
@@ -44,11 +45,13 @@
     const stopBtn = document.getElementById('stopBtn');
     const audioEl = document.getElementById('audio');
     const wavSourceEl = document.getElementById('wavSource');
+    const delegateSourceEl = document.getElementById('delegateSource');
     const levelEl = document.getElementById('level');
     const sendLevelEl = document.getElementById('sendLevel');
 
     const params = new URLSearchParams(location.search);
     if (params.get('source') === 'wav') wavSourceEl.checked = true;
+    if (params.get('delegate') === '1') delegateSourceEl.checked = true;
 
     let pc = null;
     let dc = null;
@@ -183,7 +186,24 @@
         for (const track of mic.getAudioTracks()) pc.addTrack(track, mic);
 
         dc = pc.createDataChannel('oai-events');
-        dc.onmessage = (event) => log('<- ' + String(event.data).slice(0, 300));
+        dc.onmessage = (event) => {
+          const raw = String(event.data);
+          log('<- ' + raw.slice(0, 300));
+          if (!delegateSourceEl.checked) return;
+          try {
+            const msg = JSON.parse(raw);
+            if (msg.type !== 'session.delegation.created') return;
+            setTimeout(() => {
+              dc.send(JSON.stringify({
+                type: 'session.commentary.append',
+                content: '这是 Hermes 委派后给出的答案，现在由语音模型念出来。',
+                delegation_id: msg.delegation?.id ?? null,
+                event_id: 'evt_test_1',
+              }));
+              log('-> commentary.append');
+            }, 1000);
+          } catch (_) { /* 非 JSON 消息忽略 */ }
+        };
         dc.onopen = () => log('datachannel open');
 
         const offer = await pc.createOffer();
@@ -195,7 +215,10 @@
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            session: { model: 'qwen3.8-omni-flash-realtime' },
+            session: {
+              model: 'qwen3.8-omni-flash-realtime',
+              ...(delegateSourceEl.checked ? { delegation: { type: 'client' } } : {}),
+            },
             transport: { type: 'webrtc', sdp: pc.localDescription.sdp },
           }),
         });

@@ -10,7 +10,9 @@ Hermes Desktop 的「实时对话」走 OpenAI Live API over WebRTC：
 - DashScope 24k PCM → 48k → Opus 回给浏览器
 - oai-events 数据通道：转写、错误、session.closed
 
-暂不实现委派（delegation），那是 M3 的事。
+Hermes 请求 client delegation 时进入 M3 模式：用户说完只发
+session.delegation.created，Hermes 用 commentary.append 把答案送回来，
+qwen 只负责把文本念出来。不请求委派时是 M1 的纯语音对话。
 """
 
 from __future__ import annotations
@@ -124,12 +126,17 @@ class LivePeer:
         session_update: Callable[[], dict[str, Any]],
         stats: dict[str, Any] | None = None,
         on_closed: Callable[[str], None] | None = None,
+        delegation: bool = False,
     ) -> None:
         self.id = f"sess_{uuid.uuid4().hex[:12]}"
         self._connect_upstream = connect_upstream
         self._session_update = session_update
         self._stats = stats
         self._on_closed = on_closed
+        self.delegation = delegation
+        self._delegation_id: str | None = None
+        self._speak_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._response_done = asyncio.Event()
 
         self.pc = RTCPeerConnection()
         self.track = OutboundTrack()
@@ -193,7 +200,9 @@ class LivePeer:
     async def _open_upstream(self) -> None:
         self.upstream = await self._connect_upstream()
         await self._await_event("session.created")
-        await self.upstream.send(json.dumps(self._session_update(), ensure_ascii=False))
+        await self.upstream.send(
+            json.dumps(self._session_update(self.delegation), ensure_ascii=False),
+        )
         await self._await_event("session.updated")
 
         self._send(
@@ -203,6 +212,9 @@ class LivePeer:
             },
         )
         self._spawn(self._pump_upstream())
+        if self.delegation:
+            self._spawn(self._speak_worker())
+            log.info("%s delegation mode", self.id)
         if self._stats is not None:
             self._stats["liveSessions"] = self._stats.get("liveSessions", 0) + 1
         log.info("%s upstream ready", self.id)
@@ -281,9 +293,13 @@ class LivePeer:
                 session["instructions"] = f"{session.get('instructions', '')}\n{content}".strip()
                 update["session"] = session
                 self._spawn(self._send_upstream(update))
-        elif kind in ("session.commentary.append", "session.thinking.append"):
-            # M1 不做委派；等 M3 再把文本交给模型念出来
-            log.info("%s ignoring %s in M1", self.id, kind)
+        elif kind == "session.commentary.append":
+            content = str(event.get("content") or "").strip()
+            if content and self.delegation:
+                self._speak_queue.put_nowait(content)
+        elif kind == "session.thinking.append":
+            # 进度提示不影响音频，记一笔即可
+            log.debug("%s thinking: %s", self.id, str(event.get("content") or "")[:120])
 
     async def _send_upstream(self, payload: dict[str, Any]) -> None:
         if self.upstream is None:
@@ -292,6 +308,45 @@ class LivePeer:
             await self.upstream.send(json.dumps(payload, ensure_ascii=False))
         except Exception:  # noqa: BLE001
             pass
+
+    # ---------- 委派朗读 ----------
+
+    async def _speak_worker(self) -> None:
+        """把 Hermes 的 commentary 文本依次交给 qwen 念出来。
+
+        Hermes 会把长回复切成多块，先攒一小会儿再合并，避免一句一块地念。
+        """
+        while not self.closed:
+            first = await self._speak_queue.get()
+            await asyncio.sleep(0.25)
+            parts = [first]
+            while not self._speak_queue.empty():
+                parts.append(self._speak_queue.get_nowait())
+            text = "\n".join(parts).strip()
+            if not text or self.upstream is None:
+                continue
+
+            self._response_done.clear()
+            await self._send_upstream(
+                {
+                    "type": "conversation.item.create",
+                    "item": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"请照着念下面这段文本，不要改写、不要回答、不要加话：\n{text}",
+                            },
+                        ],
+                    },
+                },
+            )
+            await self._send_upstream({"type": "response.create"})
+            try:
+                await asyncio.wait_for(self._response_done.wait(), 30)
+            except asyncio.TimeoutError:
+                log.warning("%s speak timed out", self.id)
 
     # ---------- 音频 ----------
 
@@ -338,6 +393,8 @@ class LivePeer:
                 except (json.JSONDecodeError, TypeError):
                     continue
                 self._handle_upstream_event(event)
+                if event.get("type") in ("response.done", "response.cancel"):
+                    self._response_done.set()
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -362,6 +419,8 @@ class LivePeer:
 
         if kind == "input_audio_buffer.speech_started":
             self.track.flush()
+            if self.delegation:
+                self._spawn(self._send_upstream({"type": "response.cancel"}))
             if self._stats is not None:
                 self._stats["speechStarted"] = self._stats.get("speechStarted", 0) + 1
             return
@@ -378,14 +437,28 @@ class LivePeer:
             return
 
         if kind == "conversation.item.input_audio_transcription.completed":
+            transcript = event.get("transcript") or ""
             self._send(
                 {
                     "type": "session.input_transcript.delta",
-                    "delta": event.get("transcript") or "",
+                    "delta": transcript,
                     "start_ms": now_ms,
                     "end_ms": now_ms,
                 },
             )
+            if self.delegation and str(transcript).strip():
+                self._delegation_id = f"deleg_{uuid.uuid4().hex[:10]}"
+                self._send(
+                    {
+                        "type": "session.delegation.created",
+                        "delegation": {
+                            "id": self._delegation_id,
+                            "type": "client",
+                            "target": "hermes",
+                        },
+                    },
+                )
+                log.info("%s delegated %s: %s", self.id, self._delegation_id, str(transcript)[:40])
             return
 
         if kind == "response.audio_transcript.delta":
@@ -426,12 +499,17 @@ class LiveGateway:
         self._stats = stats
         self._peers: dict[str, LivePeer] = {}
 
-    async def handle_offer(self, offer_sdp: str) -> tuple[str, str]:
+    async def handle_offer(
+        self,
+        offer_sdp: str,
+        delegation: bool = False,
+    ) -> tuple[str, str]:
         peer = LivePeer(
             connect_upstream=self._connect_upstream,
             session_update=self._session_update,
             stats=self._stats,
             on_closed=lambda peer_id: self._peers.pop(peer_id, None),
+            delegation=delegation,
         )
         self._peers[peer.id] = peer
         try:

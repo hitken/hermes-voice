@@ -1,12 +1,18 @@
 # 需求：把 Hermes Desktop 的「实时对话」接到本服务
 
-状态：**M1 已完成**（WebRTC 网关 + 端到端验证）；M2/M3 待实现
+状态：**M1/M2/M3 已完成**；M4（稳定性、文档、回归测试）进行中
 日期：2026-11-25
 
-> M1 进展：`live_gateway.py` 实现 SDP 握手、音频双向、字幕/错误/关闭事件；
-> `POST /v1/live/sessions` 已接入 `server.py`；`static/live-test.html` 可自测。
-> 实测：WebRTC 连通、模型音频 14 包 / 203520 字节、声卡实测有声 5.14s、
-> 字幕完整、无 JS 报错、会话关闭后无残留。单测 `tests/test_live_gateway.py` 通过。
+> M1：`live_gateway.py` 实现 SDP 握手、音频双向、字幕/错误/关闭事件；
+> `POST /v1/live/sessions` 已接入 `server.py`。实测 WebRTC 连通、模型音频 36 包 /
+> 549120 字节、声卡有声 15.7s、字幕完整、无 JS 报错、关闭后无残留。
+> M2：Hermes 配置已写入（`voice_chat_mode=gpt-live`、
+> `voice.gpt_live.base_url=http://127.0.0.1:8000/v1`、占位 Key，
+> `resolve_gpt_live_status().available=true`）。用 Hermes 自己的
+> `create_webrtc_session()` 生成真实 SDP 并完成握手，WebRTC 连通、字幕和声音正常。
+> M3：委派模式已实现。实测 qwen 不抢答，发出 `session.delegation.created`，
+> 收到 `session.commentary.append` 后准确念出委派答案；A 模式无回归。
+> 单测 `tests/test_live_gateway.py`、`tests/test_bridge.py` 均通过。
 
 ## 1. 背景
 
@@ -212,6 +218,6 @@ hermes config set voice.gpt_live.api_key local --force   # 任意非空占位，
 | 阶段 | 内容 | 产出 |
 | --- | --- | --- |
 | M1 ✅ | WebRTC 网关骨架：`/live/sessions`、SDP 往返、音频双向 | 独立测试页能听到 qwen |
-| M2 | 事件映射 + A 模式接入 Hermes | Hermes 里能语音对话 |
-| M3 | 委派模式 B | Hermes 工具可用，语音播报结果 |
+| M2 ✅ | 事件映射 + A 模式接入 Hermes | Hermes 后端用自身代码完成握手，语音对话正常 |
+| M3 ✅ | 委派模式 B | `delegation.created` + `commentary.append` 链路通，qwen 只念不答 |
 | M4 | 稳定性、错误处理、文档 | README 更新，回归测试 |

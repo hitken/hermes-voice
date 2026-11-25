@@ -122,21 +122,35 @@ def upstream_url() -> str:
     return f"{base}{sep}model={MODEL}"
 
 
-def session_update() -> dict:
-    """首轮会话配置。输出固定 24k PCM，输入固定 16k PCM。"""
+DELEGATION_INSTRUCTIONS = (
+    "你现在只负责朗读。用户说话时不要自己回答、不要评论、不要补充。"
+    "等待系统把 Hermes 的回答作为文本发给你，你只需把那段文本用自然的中文语音念出来，"
+    "不添加任何自己的内容。"
+)
+
+
+def session_update(delegation: bool = False) -> dict:
+    """首轮会话配置。输出固定 24k PCM，输入固定 16k PCM。
+
+    delegation=True 时关掉自动回答：用户说完只发委派事件，由 Hermes 作答，
+    模型只负责把 Hermes 的文本念出来。
+    """
+    turn_detection = {
+        "type": VAD_TYPE,
+        "threshold": 0.5,
+        "prefix_padding_ms": 300,
+        "silence_duration_ms": SILENCE_MS,
+    }
+    if delegation:
+        turn_detection["create_response"] = False
     return {
         "type": "session.update",
         "session": {
             "modalities": ["text", "audio"],
             "voice": VOICE,
-            "instructions": INSTRUCTIONS,
+            "instructions": INSTRUCTIONS + ("\n" + DELEGATION_INSTRUCTIONS if delegation else ""),
             "input_audio_transcription": {"model": "qwen3-asr-flash-realtime"},
-            "turn_detection": {
-                "type": VAD_TYPE,
-                "threshold": 0.5,
-                "prefix_padding_ms": 300,
-                "silence_duration_ms": SILENCE_MS,
-            },
+            "turn_detection": turn_detection,
             "audio": {
                 "input": {"format": {"type": "pcm", "sample_rate": 16000}},
                 "output": {
@@ -377,8 +391,11 @@ async def live_sessions(payload: dict):
             stats=STATS,
         )
 
+    session_cfg = (payload or {}).get("session") or {}
+    delegation = ((session_cfg.get("delegation") or {}).get("type") == "client")
+
     try:
-        session_id, answer = await LIVE_GATEWAY.handle_offer(offer)
+        session_id, answer = await LIVE_GATEWAY.handle_offer(offer, delegation=delegation)
     except Exception as exc:  # noqa: BLE001
         log.warning("live session failed: %r", exc)
         raise HTTPException(status_code=502, detail=f"WebRTC 会话创建失败：{exc}")

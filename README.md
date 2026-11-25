@@ -75,18 +75,34 @@ Hermes / Electron ── WebRTC(Opus) ──▶ POST /v1/live/sessions ── We
 - 数据通道 `oai-events`：字幕、错误、`session.closed`；用户开口时清空待播音频
 - 可用别名 `POST /live/sessions`
 
-自测页面：**http://127.0.0.1:8000/live-test.html**（勾选“用测试语音”可自动播一段语音，验证双向链路）。
-`?source=wav` 可自动勾选。测试语音是仓库里的 `static/test-question.wav`。
+自测页面：**http://127.0.0.1:8000/live-test.html**
+- 勾选“用测试语音”可自动播一段语音；`?source=wav` 自动勾选
+- 勾选“模拟 Hermes 委派”会模拟 `session.delegation.created` → `session.commentary.append`；
+  `?source=wav&delegate=1` 一键验证 M3
+
+接入 Hermes Desktop（改完重启桌面端）：
+
+```bash
+hermes config set voice.voice_chat_mode gpt-live
+hermes config set voice.gpt_live.base_url http://127.0.0.1:8000/v1
+hermes config set voice.gpt_live.api_key local-omni --force   # 占位，仅为通过可用性检查
+```
+
+`base_url` 会被拼成 `http://127.0.0.1:8000/v1/live/sessions`。Key 只是占位，本服务不校验。
 
 单测：
 
 ```bash
-.venv/bin/python tests/test_live_gateway.py   # 重采样 / 事件映射 / 打断 / 统计
+.venv/bin/python tests/test_live_gateway.py   # 重采样 / 事件映射 / 打断 / 统计 / 委派
 .venv/bin/python tests/test_bridge.py         # 浏览器 WebSocket 链路
 ```
 
-当前是 **M1**：只做纯语音对话，不处理 `session.delegation.created`（Hermes 的工具/记忆还不参与）。
-完整方案和后续里程碑见 [`docs/hermes-live-integration.md`](docs/hermes-live-integration.md)。
+**M1/M2** 是纯语音对话（qwen 直接听、直接答）。**M3** 是委派模式：Hermes 请求
+`session.delegation.type: client` 时，qwen 听完只发 `session.delegation.created`，
+Hermes 用自己的模型和工具干活，再通过 `session.commentary.append` 把文本送回来，
+qwen 只负责念出来。两种模式并存，由请求里的 delegation 字段决定。
+
+完整方案和里程碑见 [`docs/hermes-live-integration.md`](docs/hermes-live-integration.md)。
 
 ## 配置项
 

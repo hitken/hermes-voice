@@ -31,13 +31,17 @@ def s24(samples: int) -> bytes:
     return struct.pack("<%dh" % samples, *values)
 
 
-def make_peer(stats):
+def make_peer(stats, delegation=False):
     peer = LivePeer.__new__(LivePeer)
     peer.id = "sess_test"
     peer.channel = FakeChannel()
     peer.track = OutboundTrack()
     peer._stats = stats
     peer._started_at = asyncio.get_running_loop().time()
+    peer.delegation = delegation
+    peer._delegation_id = None
+    peer._speak_queue = asyncio.Queue()
+    peer._response_done = asyncio.Event()
     return peer
 
 
@@ -94,6 +98,50 @@ async def main():
     assert stats["lastError"] == "上游断开"
     assert peer.channel.messages[-1]["type"] == "error"
     print("error mapping OK")
+
+    # 6) 委派模式：识别完成后发 delegation.created，commentary 进朗读队列
+    import server
+
+    upd = server.session_update(delegation=True)
+    assert upd["session"]["turn_detection"]["create_response"] is False
+    assert "只负责朗读" in upd["session"]["instructions"]
+
+    dpeer = make_peer({}, delegation=True)
+    dpeer._handle_upstream_event(
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "transcript": "帮我查一下",
+        }
+    )
+    delegations = [
+        m for m in dpeer.channel.messages if m["type"] == "session.delegation.created"
+    ]
+    assert len(delegations) == 1 and delegations[0]["delegation"]["id"]
+    assert dpeer._delegation_id == delegations[0]["delegation"]["id"]
+
+    dpeer._on_client_event(
+        {
+            "type": "session.commentary.append",
+            "content": "查到了",
+            "delegation_id": dpeer._delegation_id,
+            "event_id": "evt_1",
+        }
+    )
+    assert dpeer._speak_queue.qsize() == 1
+    assert dpeer._speak_queue.get_nowait() == "查到了"
+
+    # 非委派模式不应主动发委派事件
+    apeers = make_peer({})
+    apeers._handle_upstream_event(
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "transcript": "你好",
+        }
+    )
+    assert not any(
+        m["type"] == "session.delegation.created" for m in apeers.channel.messages
+    )
+    print("delegation OK")
 
     assert IN_RATE == 16000 and OUT_RATE == 48000
     print("gateway test OK")
