@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0e14">
+  <title>小云 · 实时语音</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%235eead4'/%3E%3Ccircle cx='32' cy='32' r='13' fill='%230b0e14'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">云</div>
+        <div class="brand-text">
+          <h1>小云</h1>
+          <p id="subtitle">Qwen3.8 Omni · 实时语音</p>
+        </div>
+      </div>
+      <div class="status idle" id="status">
+        <span class="dot"></span>
+        <span id="statusText">未连接</span>
+      </div>
+    </header>
+
+    <main class="stage">
+      <div class="banner hidden" id="configBanner"></div>
+
+      <div class="transcript" id="transcript">
+        <div class="empty" id="emptyState">
+          <div class="empty-orb"><span></span></div>
+          <p class="empty-title">点击下方麦克风，开始说话</p>
+          <p class="empty-hint">建议戴耳机，避免外放声音被当成插话</p>
+        </div>
+      </div>
+
+      <div class="level-wrap" aria-hidden="true">
+        <div class="level" id="level"></div>
+      </div>
+    </main>
+
+    <footer class="dock">
+      <button id="micBtn" class="mic" type="button" aria-label="开始对话" title="开始对话">
+        <svg class="icon-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <rect x="9" y="3" width="6" height="11" rx="3"></rect>
+          <path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"></path>
+          <path d="M12 18v3"></path>
+        </svg>
+        <svg class="icon-mic-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <path d="M9 9.5V12a3 3 0 0 0 4.6 2.55"></path>
+          <path d="M15 10.5V6a3 3 0 0 0-5.9-.7"></path>
+          <path d="M5.5 11.5a6.5 6.5 0 0 0 10.3 5.2"></path>
+          <path d="M12 18v3"></path>
+          <path d="M4 4l16 16"></path>
+        </svg>
+        <span class="mic-ring"></span>
+      </button>
+
+      <div class="controls">
+        <form class="text-form" id="textForm" autocomplete="off">
+          <input id="textInput" type="text" placeholder="也可以直接打字…" maxlength="2000">
+          <button type="submit" id="sendBtn">发送</button>
+        </form>
+        <div class="row">
+          <button id="testBtn" class="ghost" type="button" title="播放一段测试音，确认扬声器是否正常">试听</button>
+          <button id="muteBtn" class="ghost" type="button" disabled>静音</button>
+          <button id="stopBtn" class="ghost" type="button" disabled>结束</button>
+          <span class="meta" id="meta"></span>
+        </div>
+      </div>
+    </footer>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
